@@ -1,0 +1,1 @@
+{"version":3,"file":"run.d.ts","sourceRoot":"","sources":["../../src/commands/run.ts"],"names":[],"mappings":"AAOA,MAAM,WAAW,UAAU;IACzB,GAAG,EAAE,MAAM,CAAC;IACZ,MAAM,EAAE,MAAM,CAAC;IACf,IAAI,EAAE,MAAM,EAAE,CAAC;CAChB;AAED,eAAO,MAAM,UAAU,GAAU,MAAM,UAAU,KAAG,OAAO,CAAC,MAAM,CAwBjE,CAAC"}
