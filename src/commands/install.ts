@@ -7,7 +7,7 @@ import { resolveDeps } from '../core/resolver.js';
 import { extractTarball } from '../core/tarball.js';
 import { createCache, computeShasumIntegrity } from '../core/cache.js';
 import { verifyIntegrity } from '../core/integrity.js';
-import { readPackageJson, writePackageJson, mergeDep, allDeps } from '../core/manifest.js';
+import { hasValidPackageJson, readPackageJson, writePackageJson, mergeDep, allDeps } from '../core/manifest.js';
 import { buildLockfile, readLockfile, writeLockfile } from '../core/lockfile.js';
 import { createBinShims } from '../core/bin-shims.js';
 import { runLifecycleScript, LIFECYCLE_ORDER } from '../core/scripts.js';
@@ -227,7 +227,7 @@ export const installCommand = async (opts: InstallOptions): Promise<number> => {
     }
     // Verify that extraction actually produced a valid package.json
     const pkgJsonPath = path.join(installPath, 'package.json');
-    if (!fs.existsSync(pkgJsonPath) || fs.statSync(pkgJsonPath).size === 0) {
+    if (!hasValidPackageJson(installPath)) {
       const msg = `Empty/missing package.json after extract for ${dep.name}@${dep.version}`;
       if (dep.isOptional) warn(msg);
       else error(msg);

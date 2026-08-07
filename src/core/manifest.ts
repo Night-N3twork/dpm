@@ -21,6 +21,18 @@ export const readPackageJson = (cwd: string): PackageJson => {
   }
 };
 
+export const hasValidPackageJson = (cwd: string): boolean => {
+  const p = path.join(cwd, 'package.json');
+  try {
+    const content = fs.readFileSync(p, 'utf8');
+    if (content.trim() === '') return false;
+    JSON.parse(content);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 export const writePackageJson = (cwd: string, pkg: PackageJson): void => {
   const p = path.join(cwd, 'package.json');
   fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');

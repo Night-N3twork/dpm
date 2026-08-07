@@ -10,6 +10,7 @@ import { execCommand } from '../commands/exec.js';
 import { cacheCommand } from '../commands/cache.js';
 import { configCommand } from '../commands/config.js';
 import { setSilent } from '../util/log.js';
+import { parseFlags } from './parse.js';
 
 const HELP = `dpm — Dusk Package Manager
 
@@ -32,36 +33,8 @@ Options:
   --registry <url>              Custom registry URL
 `;
 
-const parseFlags = (args: string[]): { positional: string[]; flags: Record<string, string | boolean> } => {
-  const positional: string[] = [];
-  const flags: Record<string, string | boolean> = {};
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === '--') { positional.push(...args.slice(i + 1)); break; }
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq !== -1) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
-      } else {
-        const next = args[i + 1];
-        if (next && !next.startsWith('-')) {
-          flags[a.slice(2)] = next;
-          i++;
-        } else {
-          flags[a.slice(2)] = true;
-        }
-      }
-    } else if (a.startsWith('-')) {
-      flags[a.slice(1)] = true;
-    } else {
-      positional.push(a);
-    }
-  }
-  return { positional, flags };
-};
-
 export const main = async (argv: string[]): Promise<number> => {
-  const args = argv.slice(2);
+  const args = argv[0] === 'node' ? argv.slice(2) : argv.slice(1);
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     process.stdout.write(HELP);
     return 0;
@@ -119,10 +92,18 @@ export const main = async (argv: string[]): Promise<number> => {
 
 // Execute when invoked directly
 if (typeof process !== 'undefined' && process.argv) {
-  void main(process.argv).then((code) => {
+  const run = main(process.argv).then((code) => {
     if (process.exit) process.exit(code);
+    return code;
   }).catch((e) => {
     process.stderr.write(`dpm: ${(e as Error).message}\n`);
     if (process.exit) process.exit(1);
+    return 1;
   });
+  const g = globalThis as Record<string, unknown>;
+  const duskProcess = g['__process'] as Record<string, unknown> | undefined;
+  if (duskProcess) {
+    duskProcess['_exitReserved'] = true;
+    duskProcess['__mainPromise'] = run;
+  }
 }
