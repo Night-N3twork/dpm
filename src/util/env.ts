@@ -23,5 +23,5 @@ export const defaultCacheDir = (): string => {
 export const defaultRegistry = (): string => {
   const g = globalThis as Record<string, unknown>;
   const proc = g['process'] as { env?: Record<string, string> } | undefined;
-  return proc?.env?.['DPM_REGISTRY'] ?? proc?.env?.['npm_config_registry'] ?? 'https://registry.npmjs.org';
+  return proc?.env?.['DPM_REGISTRY'] ?? 'https://registry.dusk.night-x.com/';
 };

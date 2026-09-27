@@ -43,6 +43,7 @@ export const buildLockfile = (
       version: dep.version,
       resolved: dep.tarballUrl,
       ...(dep.integrity !== undefined ? { integrity: dep.integrity } : {}),
+      ...(dep.registry !== undefined ? { registry: dep.registry } : {}),
       ...(dep.isDev ? { dev: true } : {}),
       ...(Object.keys(subDeps).length > 0 ? { dependencies: subDeps } : {}),
     };

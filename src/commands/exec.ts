@@ -12,6 +12,7 @@ export interface ExecOptions {
   command: string;
   args: string[];
   tempInstall?: boolean;
+  registry?: string;
 }
 
 const findLocalBin = (cwd: string, name: string): string | null => {
@@ -39,6 +40,7 @@ export const execCommand = async (opts: ExecOptions): Promise<number> => {
       packages: [pkgName],
       saveDev: false,
       silent: true,
+      ...(opts.registry ? { registry: opts.registry } : {}),
     });
     binPath = findLocalBin(tmpDir, opts.command);
   }

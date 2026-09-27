@@ -12,6 +12,7 @@ test('buildLockfile produces npm v3 shape', () => {
     version: '4.17.21',
     tarballUrl: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
     integrity: 'sha512-abc',
+    registry: 'https://registry.dusk.night-x.com/',
     dependencies: {},
     isDev: false,
     installPath: 'node_modules/lodash',
@@ -24,6 +25,7 @@ test('buildLockfile produces npm v3 shape', () => {
   expect(lockfile.packages['']!.dependencies).toEqual({ lodash: '^4.17.0' });
   expect(lockfile.packages['node_modules/lodash']!.version).toBe('4.17.21');
   expect(lockfile.packages['node_modules/lodash']!.integrity).toBe('sha512-abc');
+  expect(lockfile.packages['node_modules/lodash']!.registry).toBe('https://registry.dusk.night-x.com/');
 });
 
 test('lockfile roundtrip via writeLockfile/readLockfile', () => {

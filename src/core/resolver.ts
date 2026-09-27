@@ -25,11 +25,14 @@
 
 import * as path from 'node:path';
 import * as semver from '../semver/index.js';
+import { readLocalPackage } from './local-package.js';
 import type { Packument, ResolvedDep } from '../types.js';
-import type { RegistryClient } from './registry.js';
+import { RegistryResponseError, type RegistryClient } from './registry.js';
 
 export interface ResolveOptions {
   registry: RegistryClient;
+  registryFor?: (name: string) => RegistryClient;
+  fallbackRegistry?: RegistryClient;
   rootDeps: Record<string, string>;
   rootDevDeps?: Record<string, string>;
   rootOptionalDeps?: Record<string, string>;
@@ -43,6 +46,8 @@ export interface InstallPlan {
   // Keyed by installPath (e.g. "node_modules/foo" or "node_modules/vite/node_modules/rolldown").
   resolved: Map<string, ResolvedDep>;
   errors: string[];
+  // These failures must abort installation before any project files are changed.
+  fatalErrors: string[];
   warnings: string[];
 }
 
@@ -113,6 +118,16 @@ const findCompatibleAncestor = (
   return null;
 };
 
+const findCompatibleRoot = (
+  resolved: Map<string, ResolvedDep>,
+  name: string,
+  range: string,
+): { installPath: string; dep: ResolvedDep } | null => {
+  const installPath = rootInstallPath(name);
+  const dep = resolved.get(installPath);
+  return dep && semver.satisfies(dep.version, range) ? { installPath, dep } : null;
+};
+
 // Check whether a name is already taken at the root level by a DIFFERENT version
 // (that doesn't satisfy the requested range). If so, we need to nest.
 const rootHasConflict = (
@@ -142,12 +157,13 @@ const synthesizeUrlDep = (name: string, url: string, isDev: boolean, isOptional:
   };
 };
 
-const synthesizeFileDep = (name: string, absPath: string, isDev: boolean, isOptional: boolean, isPeer: boolean, installPath: string): ResolvedDep => {
+const synthesizeFileDep = (name: string, absPath: string, manifest: { version?: string; dependencies?: Record<string, string> }, integrity: string, isDev: boolean, isOptional: boolean, isPeer: boolean, installPath: string): ResolvedDep => {
   return {
     name,
-    version: '0.0.0-file',
-    tarballUrl: '',
-    dependencies: {},
+    version: manifest.version ?? '0.0.0-file',
+    tarballUrl: `file:${absPath}`,
+    integrity,
+    dependencies: manifest.dependencies ?? {},
     isDev,
     ...(isOptional ? { isOptional: true } : {}),
     ...(isPeer ? { isPeer: true } : {}),
@@ -160,18 +176,29 @@ const synthesizeFileDep = (name: string, absPath: string, isDev: boolean, isOpti
 export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> => {
   const resolved = new Map<string, ResolvedDep>();
   const errors: string[] = [];
+  const fatalErrors: string[] = [];
   const warnings: string[] = [];
 
-  const packumentCache = new Map<string, Promise<Packument | null>>();
+  const packumentCache = new Map<string, Promise<{ packument: Packument; registry: RegistryClient } | null>>();
 
-  const getPackument = (name: string): Promise<Packument | null> => {
-    let existing = packumentCache.get(name);
+  const getPackument = (name: string): Promise<{ packument: Packument; registry: RegistryClient } | null> => {
+    const registry = opts.registryFor?.(name) ?? opts.registry;
+    const cacheKey = `${registry.origin}\0${name}`;
+    let existing = packumentCache.get(cacheKey);
     if (existing) return existing;
-    existing = opts.registry.getPackument(name).catch((e: unknown) => {
+    existing = registry.getPackument(name).then((packument) => ({ packument, registry })).catch(async (e: unknown) => {
+      if (e instanceof RegistryResponseError && e.status === 404 && opts.fallbackRegistry) {
+        try {
+          return { packument: await opts.fallbackRegistry.getPackument(name), registry: opts.fallbackRegistry };
+        } catch (fallbackError) {
+          errors.push(`Failed to fetch ${name}: ${(fallbackError as Error).message}`);
+          return null;
+        }
+      }
       errors.push(`Failed to fetch ${name}: ${(e as Error).message}`);
       return null;
     });
-    packumentCache.set(name, existing);
+    packumentCache.set(cacheKey, existing);
     return existing;
   };
 
@@ -202,7 +229,12 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
   }
 
   const enqueueSubDeps = (
-    v: { dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; peerDependencies?: Record<string, string> },
+    v: {
+      dependencies?: Record<string, string>;
+      optionalDependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+    },
     parentPath: string,
     sink: QueueItem[],
   ): void => {
@@ -213,16 +245,27 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
       sink.push({ name: dn, rawSpec: dr, isDev: false, isOptional: true, isPeer: false, parentPath });
     }
     for (const [dn, dr] of Object.entries(v.peerDependencies ?? {})) {
+      if (v.peerDependenciesMeta?.[dn]?.optional) continue;
       sink.push({ name: dn, rawSpec: dr, isDev: false, isOptional: false, isPeer: true, parentPath });
     }
   };
 
   while (frontier.length > 0) {
+    frontier.sort((a, b) => a.name.localeCompare(b.name) || a.rawSpec.localeCompare(b.rawSpec) || (a.parentPath ?? '').localeCompare(b.parentPath ?? ''));
     const registryItems: QueueItem[] = [];
     for (const item of frontier) {
       // Reuse an ancestor-hoisted version if compatible.
-      const hit = findCompatibleAncestor(resolved, item.parentPath, item.name, item.rawSpec);
+      const hit = item.isPeer
+        ? findCompatibleRoot(resolved, item.name, item.rawSpec)
+        : findCompatibleAncestor(resolved, item.parentPath, item.name, item.rawSpec);
       if (hit) continue;
+
+      const rootPeer = resolved.get(rootInstallPath(item.name));
+      if (item.isPeer && rootPeer) {
+        const parent = item.parentPath ? resolved.get(item.parentPath)?.name ?? item.parentPath : 'root project';
+        fatalErrors.push(`Peer dependency conflict: ${parent} requires ${item.name}@${item.rawSpec}, but root has ${rootPeer.version}`);
+        continue;
+      }
 
       const spec = classifySpec(item.rawSpec, opts.rootDir);
       if (spec.kind === 'url') {
@@ -238,7 +281,17 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
           ? nestedInstallPath(item.parentPath, item.name)
           : rootInstallPath(item.name);
         if (resolved.has(installPath)) continue;
-        resolved.set(installPath, synthesizeFileDep(item.name, spec.filePath!, item.isDev, item.isOptional, item.isPeer, installPath));
+        try {
+          const local = readLocalPackage(spec.filePath!);
+          if (local.manifest.name !== item.name) throw new Error(`Local package name ${local.manifest.name} does not match dependency ${item.name}`);
+          const dep = synthesizeFileDep(item.name, spec.filePath!, local.manifest, local.integrity, item.isDev, item.isOptional, item.isPeer, installPath);
+          resolved.set(installPath, dep);
+          enqueueSubDeps(local.manifest, installPath, registryItems);
+        } catch (e) {
+          const message = `Cannot resolve ${item.name}@${item.rawSpec}: ${(e as Error).message}`;
+          if (item.isOptional) warnings.push(message);
+          else errors.push(message);
+        }
         continue;
       }
       if (spec.kind === 'unsupported') {
@@ -264,13 +317,15 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
 
     for (let i = 0; i < names.length; i++) {
       const name = names[i]!;
-      const packument = packuments[i];
-      const requests = byName.get(name)!;
-      if (!packument) {
-        for (const req of requests) {
-          if (req.isOptional) {
-            warnings.push(`Skipping optional ${req.name}@${req.rawSpec}: packument unavailable`);
-          }
+       const resolvedPackument = packuments[i];
+       const requests = byName.get(name)!;
+        if (!resolvedPackument) {
+          for (const req of requests) {
+            if (req.isOptional) {
+              warnings.push(`Skipping optional ${req.name}@${req.rawSpec}: packument unavailable`);
+            } else if (req.isPeer) {
+              fatalErrors.push(`Cannot resolve required peer ${req.name}@${req.rawSpec}: packument unavailable`);
+            }
         }
         continue;
       }
@@ -278,23 +333,36 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
       // Process each request individually so conflicting versions get nested.
       for (const req of requests) {
         // Re-check ancestor compat in case earlier reqs in this wave hoisted something.
-        const hit = findCompatibleAncestor(resolved, req.parentPath, req.name, req.rawSpec);
+        const hit = req.isPeer
+          ? findCompatibleRoot(resolved, req.name, req.rawSpec)
+          : findCompatibleAncestor(resolved, req.parentPath, req.name, req.rawSpec);
         if (hit) continue;
 
-        const candidate = resolveOneVersion(packument, req.rawSpec);
+        const rootPeer = resolved.get(rootInstallPath(req.name));
+        if (req.isPeer && rootPeer) {
+          const parent = req.parentPath ? resolved.get(req.parentPath)?.name ?? req.parentPath : 'root project';
+          fatalErrors.push(`Peer dependency conflict: ${parent} requires ${req.name}@${req.rawSpec}, but root has ${rootPeer.version}`);
+          continue;
+        }
+
+        const candidate = resolveOneVersion(resolvedPackument.packument, req.rawSpec);
         if (!candidate) {
           const msg = `Cannot resolve ${req.name}@${req.rawSpec}: no matching version`;
           if (req.isOptional) warnings.push(msg);
-          else errors.push(msg);
+          else {
+            errors.push(msg);
+            if (req.isPeer) fatalErrors.push(msg);
+          }
           continue;
         }
-        const v = packument.versions[candidate];
+        const v = resolvedPackument.packument.versions[candidate];
         if (!v) {
           const msg = `Version ${candidate} not found in packument for ${req.name}`;
           if (req.isOptional) warnings.push(msg);
           else errors.push(msg);
           continue;
         }
+        const registry = resolvedPackument.registry;
 
         // Pick install path. If root slot for this name is taken by an incompatible
         // version AND we have a parent to nest under, nest. Otherwise install at root.
@@ -315,6 +383,7 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
                 name: req.name,
                 version: candidate,
                 tarballUrl: v.dist.tarball,
+                registry: registry.origin,
                 ...(v.dist.integrity !== undefined ? { integrity: v.dist.integrity } : {}),
                 ...(v.dist.shasum !== undefined ? { shasum: v.dist.shasum } : {}),
                 dependencies: v.dependencies ?? {},
@@ -336,6 +405,7 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
           name: req.name,
           version: candidate,
           tarballUrl: v.dist.tarball,
+          registry: registry.origin,
           ...(v.dist.integrity !== undefined ? { integrity: v.dist.integrity } : {}),
           ...(v.dist.shasum !== undefined ? { shasum: v.dist.shasum } : {}),
           dependencies: v.dependencies ?? {},
@@ -363,7 +433,7 @@ export const resolveDeps = async (opts: ResolveOptions): Promise<InstallPlan> =>
 
   hoistPass(resolved);
 
-  return { resolved, errors, warnings };
+  return { resolved, errors, fatalErrors, warnings };
 };
 
 // Hoist nested entries to the highest position where they don't conflict.

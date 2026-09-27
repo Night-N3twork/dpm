@@ -14,7 +14,8 @@ import { runLifecycleScript, LIFECYCLE_ORDER } from '../core/scripts.js';
 import { info, warn, error } from '../util/log.js';
 import { defaultRegistry, defaultCacheDir } from '../util/env.js';
 import { pAll } from '../util/p-all.js';
-import type { ResolvedDep } from '../types.js';
+import { satisfies } from '../semver/index.js';
+import type { LockfileV3, ResolvedDep } from '../types.js';
 
 const DEFAULT_CONCURRENCY = 16;
 
@@ -26,7 +27,40 @@ export interface InstallOptions {
   cacheDir?: string;
   noScripts?: boolean;
   silent?: boolean;
+  frozenLockfile?: boolean;
+  offline?: boolean;
+  npmFallback?: boolean;
 }
+
+export const lockedTarball = (bytes: Uint8Array | null, integrity: string | undefined): Uint8Array | null => {
+  if (!bytes || !integrity || !verifyIntegrity(bytes, integrity)) return null;
+  return bytes;
+};
+
+export const validateFrozenLockfile = (lockfile: LockfileV3, rootDeps: Record<string, string>): void => {
+  for (const [name, range] of Object.entries(rootDeps)) {
+    const entry = lockfile.packages[`node_modules/${name}`];
+    if (!entry?.version) throw new Error(`Lockfile is missing ${name}`);
+    if (!satisfies(entry.version, range)) {
+      throw new Error(`Lockfile version ${entry.version} for ${name} does not satisfy ${range}`);
+    }
+  }
+};
+
+const resolvedFromLockfile = (lockfile: LockfileV3): Map<string, ResolvedDep> => {
+  const resolved = new Map<string, ResolvedDep>();
+  for (const [installPath, entry] of Object.entries(lockfile.packages)) {
+    if (!installPath || !entry.resolved || !entry.version) continue;
+    const name = installPath.slice(installPath.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    resolved.set(installPath, {
+      name, version: entry.version, tarballUrl: entry.resolved,
+      ...(entry.integrity ? { integrity: entry.integrity } : {}),
+      ...(entry.registry ? { registry: entry.registry } : {}),
+      dependencies: entry.dependencies ?? {}, isDev: entry.dev ?? false, installPath,
+    });
+  }
+  return resolved;
+};
 
 const parsePackageSpec = (spec: string): { name: string; range: string } => {
   // Handle @scope/name@version
@@ -75,20 +109,35 @@ export const installCommand = async (opts: InstallOptions): Promise<number> => {
     return 0;
   }
 
-  // Resolve
-  info(`Resolving from ${registryUrl} ...`);
+  const registryFor = (_name: string) => createRegistryClient(registryUrl);
   const registry = createRegistryClient(registryUrl);
+  const npmFallback = opts.npmFallback ? createRegistryClient('https://registry.npmjs.org/') : undefined;
   const cache = createCache(cacheDir);
-  const plan = await resolveDeps({
-    registry,
-    rootDeps,
-    rootDevDeps,
-    rootOptionalDeps: rootOptDeps,
-    rootPeerDeps,
-    rootDir: cwd,
-    includeDev: true,
-  });
+  const locked = readLockfile(cwd);
+  if ((opts.frozenLockfile || opts.offline) && !locked) throw new Error('A lockfile is required for frozen or offline installation');
+  if (opts.frozenLockfile && opts.packages?.length) throw new Error('Cannot add packages with --frozen-lockfile');
+  if (opts.frozenLockfile && locked) {
+    validateFrozenLockfile(locked, { ...rootDeps, ...rootDevDeps, ...rootOptDeps, ...rootPeerDeps });
+  }
+  if ((opts.offline || opts.frozenLockfile) && locked) {
+    for (const [installPath, entry] of Object.entries(locked.packages)) {
+      if (!installPath || !entry.resolved) continue;
+      const bytes = lockedTarball(entry.integrity ? cache.read(entry.integrity) : null, entry.integrity);
+      if (!bytes) throw new Error(`Offline cache integrity check failed for ${installPath}`);
+    }
+  }
+  info(`Resolving from ${registry.origin} ...`);
+  const plan = (opts.offline || opts.frozenLockfile) && locked
+    ? { resolved: resolvedFromLockfile(locked), errors: [], fatalErrors: [], warnings: [] }
+    : await resolveDeps({
+      registry, registryFor, rootDeps, rootDevDeps, rootOptionalDeps: rootOptDeps,
+      rootPeerDeps, rootDir: cwd, includeDev: true, ...(npmFallback ? { fallbackRegistry: npmFallback } : {}),
+    });
 
+  if (plan.fatalErrors.length > 0) {
+    for (const fatalError of plan.fatalErrors) error(fatalError);
+    return 1;
+  }
   if (plan.warnings.length > 0) {
     for (const w of plan.warnings) warn(w);
   }
@@ -97,7 +146,6 @@ export const installCommand = async (opts: InstallOptions): Promise<number> => {
     if (plan.resolved.size === 0) return 1;
     warn('Continuing with partial resolution.');
   }
-
   info(`Resolved ${plan.resolved.size} packages.`);
 
   // Update package.json with concrete versions for newly-added packages
@@ -142,14 +190,9 @@ export const installCommand = async (opts: InstallOptions): Promise<number> => {
       const srcP = path.join(src, entry.name);
       const dstP = path.join(dst, entry.name);
       if (entry.isDirectory()) copyDirRecursive(srcP, dstP);
-      else if (entry.isSymbolicLink()) {
-        try {
-          const target = fs.readlinkSync(srcP);
-          fs.symlinkSync(target, dstP);
-        } catch { /* */ }
-      } else {
-        try { fs.copyFileSync(srcP, dstP); } catch { /* */ }
-      }
+      else if (entry.isSymbolicLink()) throw new Error(`Local package contains a symbolic link: ${srcP}`);
+      else if (entry.isFile()) fs.copyFileSync(srcP, dstP);
+      else throw new Error(`Local package contains an unsupported entry: ${srcP}`);
     }
   };
 
@@ -192,11 +235,20 @@ export const installCommand = async (opts: InstallOptions): Promise<number> => {
     // Fetch tarball (use cache if available)
     let tarballBytes: Uint8Array | null = null;
     if (dep.integrity && cache.has(dep.integrity)) {
-      tarballBytes = cache.read(dep.integrity);
+      tarballBytes = lockedTarball(cache.read(dep.integrity), dep.integrity);
+      if (!tarballBytes) {
+        try { fs.rmSync(cache.pathFor(dep.integrity), { force: true }); } catch { /* */ }
+      }
     }
     if (!tarballBytes) {
+      if (opts.offline || opts.frozenLockfile) {
+        const msg = `Locked cache entry unavailable for ${dep.name}@${dep.version}`;
+        if (dep.isOptional) warn(msg);
+        else error(msg);
+        return;
+      }
       try {
-        tarballBytes = await registry.getTarball(dep.tarballUrl);
+        tarballBytes = await createRegistryClient(dep.registry ?? registryFor(dep.name).origin).getTarball(dep.tarballUrl);
       } catch (e) {
         const msg = `Fetch failed for ${dep.name}@${dep.version}: ${(e as Error).message}`;
         if (dep.isOptional) warn(msg);
@@ -275,12 +327,14 @@ export const installCommand = async (opts: InstallOptions): Promise<number> => {
   }
 
   // Write lockfile
-  const lockfile = buildLockfile(
-    pkg.name, pkg.version,
-    pkg.dependencies ?? {}, pkg.devDependencies ?? {},
-    plan.resolved,
-  );
-  writeLockfile(cwd, lockfile);
+  if (!opts.frozenLockfile) {
+    const lockfile = buildLockfile(
+      pkg.name, pkg.version,
+      pkg.dependencies ?? {}, pkg.devDependencies ?? {},
+      plan.resolved,
+    );
+    writeLockfile(cwd, lockfile);
+  }
 
   info(`Done. Installed ${plan.resolved.size} packages.`);
   return 0;

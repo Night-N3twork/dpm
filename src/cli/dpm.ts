@@ -10,11 +10,15 @@ import { execCommand } from '../commands/exec.js';
 import { cacheCommand } from '../commands/cache.js';
 import { configCommand } from '../commands/config.js';
 import { setSilent } from '../util/log.js';
+import { parseFlags } from './args.js';
+
+const NPM_REGISTRY = 'https://registry.npmjs.org/';
 
 const HELP = `dpm — Dusk Package Manager
 
 Usage:
   dpm install [packages...]     Install dependencies (alias: dpm i, dpm add)
+  dpm npm install [packages...] Install npm packages from npmjs
   dpm uninstall <pkg>           Remove a package (alias: dpm rm, dpm remove)
   dpm run <script> [args...]    Run a package.json script
   dpm exec <command> [args...]  Run a local-bin command
@@ -22,6 +26,7 @@ Usage:
   dpm init [--yes]              Initialize a new package.json
   dpm cache <clean|verify|ls>   Manage the cache
   dpm config <get|set|delete> .. Manage config
+  dpm publish [args...]          Publishing is not available yet
   dpm --version                 Print dpm version
   dpm --help                    Show this help
 
@@ -29,36 +34,11 @@ Options:
   -D, --save-dev                Save to devDependencies
   -S, --save                    Save to dependencies (default)
   --silent                      Suppress output
-  --registry <url>              Custom registry URL
+  --registry <url>              Override the selected DPM or npm registry
+  --frozen-lockfile             Require the existing lockfile and verified cache
+  --offline                     Install only verified cached lockfile artifacts
+  --no-npm-fallback             Disable npm fallback for direct installs
 `;
-
-const parseFlags = (args: string[]): { positional: string[]; flags: Record<string, string | boolean> } => {
-  const positional: string[] = [];
-  const flags: Record<string, string | boolean> = {};
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === '--') { positional.push(...args.slice(i + 1)); break; }
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq !== -1) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
-      } else {
-        const next = args[i + 1];
-        if (next && !next.startsWith('-')) {
-          flags[a.slice(2)] = next;
-          i++;
-        } else {
-          flags[a.slice(2)] = true;
-        }
-      }
-    } else if (a.startsWith('-')) {
-      flags[a.slice(1)] = true;
-    } else {
-      positional.push(a);
-    }
-  }
-  return { positional, flags };
-};
 
 export const main = async (argv: string[]): Promise<number> => {
   const args = argv.slice(2);
@@ -86,8 +66,27 @@ export const main = async (argv: string[]): Promise<number> => {
           saveDev: !!flags['save-dev'] || !!flags['D'],
           ...(flags['registry'] ? { registry: flags['registry'] as string } : {}),
           noScripts: !!flags['ignore-scripts'],
+          frozenLockfile: !!flags['frozen-lockfile'],
+           offline: !!flags['offline'],
+           npmFallback: !flags['no-npm-fallback'],
           silent: !!flags['silent'],
         });
+      case 'npm':
+        if (positional[0] === 'install' || positional[0] === 'i' || positional[0] === 'add') {
+          return await installCommand({
+            cwd,
+            packages: positional.slice(1),
+            saveDev: !!flags['save-dev'] || !!flags['D'],
+            registry: (flags['registry'] as string | undefined) ?? NPM_REGISTRY,
+            noScripts: !!flags['ignore-scripts'],
+            frozenLockfile: !!flags['frozen-lockfile'],
+            offline: !!flags['offline'],
+            npmFallback: false,
+            silent: !!flags['silent'],
+          });
+        }
+        process.stderr.write(`dpm npm: unsupported command '${positional[0] ?? ''}'\n`);
+        return 1;
       case 'uninstall': case 'rm': case 'remove': case 'un':
         return await uninstallCommand({ cwd, packages: positional });
       case 'run': case 'run-script':
@@ -106,6 +105,10 @@ export const main = async (argv: string[]): Promise<number> => {
       case 'config':
         if (positional.length === 0) { process.stderr.write('dpm config: missing subcommand\n'); return 1; }
         return await configCommand(positional[0]!, positional.slice(1));
+      case 'publish':
+        // TODO: add the authenticated official registry publishing interface.
+        process.stderr.write('dpm publish: publishing is not available yet\n');
+        return 1;
       default:
         process.stderr.write(`dpm: unknown command '${sub}'\n`);
         process.stderr.write(HELP);
@@ -119,10 +122,17 @@ export const main = async (argv: string[]): Promise<number> => {
 
 // Execute when invoked directly
 if (typeof process !== 'undefined' && process.argv) {
-  void main(process.argv).then((code) => {
+  const run = main(process.argv).then((code) => {
     if (process.exit) process.exit(code);
   }).catch((e) => {
     process.stderr.write(`dpm: ${(e as Error).message}\n`);
     if (process.exit) process.exit(1);
   });
+  const duskProcess = (globalThis as typeof globalThis & {
+    __process?: { _exitReserved?: boolean; __mainPromise?: Promise<void> };
+  }).__process;
+  if (duskProcess) {
+    duskProcess._exitReserved = true;
+    duskProcess.__mainPromise = run;
+  }
 }

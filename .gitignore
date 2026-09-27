@@ -1,4 +1,8 @@
 node_modules/
 dist/
+target/
+.superpowers/
+.wasm-bindgen/
 *.tgz
 .DS_Store
+docs/

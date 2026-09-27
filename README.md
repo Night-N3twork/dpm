@@ -1,253 +1,48 @@
-# @nightnetwork/dpm — Dusk Package Manager
+# @nightnetwork/dpm
 
-A fast, npm-compatible package manager built for both Node.js and DuskJS runtimes.
+The 1.0.0 npm release is the Rust browser WebAssembly core of the Dusk Package Manager. It exports wasm-bindgen's default async initializer and `execute(args, capabilities, cwd, context)`. It does not install a terminal command, expose the legacy TypeScript API, or provide full npm CLI compatibility. The Rust terminal source remains in this repository but is not shipped in the npm package.
 
-## Features
+## Browser API
 
-- **Full npm compatibility** — drop-in replacement for `npm`, `npx`, and `pnpm` commands
-- **Registry support** — works with the public npm registry and custom registries
-- **Lockfile support** — generates and reads `package-lock.json` v3 format
-- **Content-addressable cache** — SHA-512 integrity-based caching for fast offline installs
-- **Integrity verification** — SHA-1, SHA-256, and SHA-512 SRI verification of all tarballs
-- **Bin shims** — automatic `node_modules/.bin` shim generation with native binary detection
-- **Semver resolution** — built-in semver parser supporting `^`, `~`, hyphen ranges, x-ranges, `||` alternatives, and prerelease tags
-- **Dependency hoisting** — npm-compatible hoisting with nested fallback for version conflicts
-- **Parallel installs** — concurrent BFS dependency resolution and parallel tarball fetching
-- **Lifecycle scripts** — runs `preinstall`, `install`, `postinstall`, `prepublish`, and `prepare` scripts
-- **CLI aliases** — provides `npm`, `npx`, and `pnpm` compatibility shims
-- **Dual runtime** — works in standard Node.js and as `/bin/dpm` inside DuskJS
+```js
+import init, { execute } from '@nightnetwork/dpm';
+import wasmUrl from '@nightnetwork/dpm/wasm?url'; // Vite-style asset URL
 
-## Installation
+const wasmBytes = await fetch(wasmUrl).then((response) => response.arrayBuffer());
+await init({ module_or_path: wasmBytes });
 
-```bash
-npm install -g @nightnetwork/dpm
-```
-
-## CLI Usage
-
-```
-dpm — Dusk Package Manager
-
-Usage:
-  dpm install [packages...]     Install dependencies (alias: dpm i, dpm add)
-  dpm uninstall <pkg>           Remove a package (alias: dpm rm, dpm remove)
-  dpm run <script> [args...]    Run a package.json script
-  dpm exec <command> [args...]  Run a local-bin command
-  dpm list                      List installed packages
-  dpm init [--yes]              Initialize a new package.json
-  dpm cache <clean|verify|ls>   Manage the cache
-  dpm config <get|set|delete>   Manage config
-  dpm --version                 Print dpm version
-  dpm --help                    Show help
-
-Options:
-  -D, --save-dev                Save to devDependencies
-  -S, --save                    Save to dependencies (default)
-  --silent                      Suppress output
-  --registry <url>              Custom registry URL
-```
-
-### Install dependencies
-
-```bash
-# Install all dependencies from package.json
-dpm install
-
-# Add a package to dependencies
-dpm install express
-
-# Add a package to devDependencies
-dpm install -D vitest
-
-# Install from a custom registry
-dpm install --registry https://registry.example.com
-```
-
-### Remove a package
-
-```bash
-dpm uninstall lodash
-# or
-dpm rm lodash
-```
-
-### Run scripts
-
-```bash
-dpm run build
-dpm run test -- --watch
-```
-
-### Execute binaries
-
-```bash
-# Run a locally installed binary
-dpm exec vitest
-
-# Run with dpx (like npx)
-dpx create-react-app my-app
-dpx -p typescript tsc --init
-```
-
-### List installed packages
-
-```bash
-dpm list
-```
-
-### Initialize a project
-
-```bash
-dpm init
-dpm init --yes
-```
-
-### Cache management
-
-```bash
-dpm cache ls
-dpm cache verify
-dpm cache clean
-```
-
-### Configuration
-
-```bash
-dpm config get registry
-dpm config set registry https://registry.example.com
-dpm config delete registry
-```
-
-## npm / npx / pnpm Compatibility
-
-dpm ships with compatibility aliases that map directly to dpm commands:
-
-| Alias | Maps to |
-|-------|--------|
-| `npm install` | `dpm install` |
-| `npm uninstall` | `dpm uninstall` |
-| `npm run` | `dpm run` |
-| `npm exec` | `dpm exec` |
-| `npm list` | `dpm list` |
-| `npm init` | `dpm init` |
-| `npm cache` | `dpm cache` |
-| `npm config` | `dpm config` |
-| `npx <cmd>` | `dpx <cmd>` |
-| `pnpm add` | `dpm install` |
-| `pnpm remove` | `dpm uninstall` |
-| `pnpm dlx` | `dpx` |
-| `pnpm run` | `dpm run` |
-| `pnpm exec` | `dpm exec` |
-| `pnpm list` | `dpm list` |
-| `pnpm init` | `dpm init` |
-
-## Architecture
-
-### Core Modules
-
-| Module | Description |
-|--------|------------|
-| `core/resolver` | Concurrent BFS dependency resolver with npm-compatible hoisting and nested fallback. Handles registry semver ranges, URL tarballs, `file:` deps, and dist-tags. Includes a multi-pass hoisting algorithm that lifts nested packages to the highest conflict-free position. |
-| `core/registry` | HTTP client for npm-compatible registries. Fetches packument metadata (abbreviated format) and tarball bytes. |
-| `core/tarball` | Pure-TypeScript gzip decompression and ustar tar parser. Extracts tarballs to disk with configurable component stripping. |
-| `core/lockfile` | Reads and writes `package-lock.json` in lockfile v3 format. Builds lockfile entries from the resolved dependency graph. |
-| `core/cache` | Content-addressable filesystem cache using SHA-512 hex sharding (`<cacheDir>/<alg>/<AA>/<BB>/<hex>`). |
-| `core/integrity` | Tarball integrity verification supporting SHA-512, SHA-256, and SHA-1 SRI hashes, plus legacy hex shasums. |
-| `core/bin-shims` | Creates `node_modules/.bin` shims with automatic detection of native binaries (ELF/Mach-O/PE), shebanged scripts, and plain JS files. |
-| `core/manifest` | `package.json` read/write helpers, dependency merging, and package root discovery. |
-| `core/scripts` | Lifecycle script runner (`preinstall`, `install`, `postinstall`, `prepublish`, `prepare`) with npm-compatible environment variables. |
-| `semver` | Minimal built-in semver implementation supporting `^`, `~`, `>`, `>=`, `<`, `<=`, `=`, `||`, hyphen ranges, x-ranges, and prerelease comparison. |
-
-### Dependency Resolution Strategy
-
-1. Walk the dependency graph in BFS waves with configurable concurrency
-2. For each transitive dependency, try to satisfy with an already-hoisted version (walking up the parent chain)
-3. If no compatible hoisted version exists, install at the highest level with no conflict
-4. If a transitive dependency's range is incompatible with the hoisted version, install nested under the parent
-5. Post-resolution hoisting pass lifts nested packages to the highest conflict-free ancestor
-6. Single-path lift pass catches remaining deeply-nested packages that can be promoted
-
-### Supported Spec Types
-
-- **Registry semver ranges**: `^1.2.3`, `~1.0.0`, `>=1`, `*`, `latest`
-- **URL tarballs**: `https://example.com/foo-1.0.0.tgz`
-- **File dependencies**: `file:./packages/shared`
-- **Dist-tags**: `latest`, `next`, etc.
-- **npm aliases**: `npm:package@version`
-
-## DuskJS Integration
-
-When running inside [DuskJS](https://github.com/nightnetwork), dpm operates as the built-in package manager at `/bin/dpm`. The runtime is auto-detected via `detectRuntime()` and `isDuskJS()` helpers from `util/env`.
-
-Key differences in DuskJS mode:
-- Cache directory defaults to the DuskJS system cache path
-- Registry URL can be overridden via DuskJS configuration
-- Bin shims include a `/bin/node` fallback path for JS scripts without shebangs
-
-## Configuration
-
-dpm reads configuration via `dpm config`:
-
-```bash
-# Set a custom registry
-dpm config set registry https://registry.example.com
-
-# View current registry
-dpm config get registry
-
-# Remove a config key
-dpm config delete registry
-```
-
-The `--registry` flag on install commands takes precedence over config values.
-
-## Programmatic API
-
-dpm exports its core modules for programmatic use:
-
-```typescript
-import {
-  installCommand,
-  uninstallCommand,
-  createRegistryClient,
-  resolveDeps,
-  extractTarball,
-  parseTar,
-  verifyIntegrity,
-  computeIntegrity,
-  createCache,
-  readPackageJson,
-  writePackageJson,
-  buildLockfile,
-  readLockfile,
-  writeLockfile,
-  detectRuntime,
-  isDuskJS,
-  semver,
-} from '@nightnetwork/dpm';
-
-// Resolve dependencies programmatically
-const registry = createRegistryClient('https://registry.npmjs.org');
-const plan = await resolveDeps({
-  registry,
-  rootDeps: { express: '^4.18.0' },
+// Browser hosts provide the filesystem, network, and output boundary. Even
+// --help checks for an interrupted metadata transaction before dispatch.
+const capabilities = {
+  exists: async () => false,
+};
+const result = await execute(['--help'], capabilities, '/project', {
+  env: {},
 });
-
-console.log(`Resolved ${plan.resolved.size} packages`);
+console.log(result.status, result.stdout, result.stderr);
 ```
 
-## Contributing
+Resolve `@nightnetwork/dpm/wasm` as an asset URL with your browser bundler, or copy that subpath's WASM asset into your app. The default initializer can also fetch `dpm_wasm_bg.wasm` beside the generated JavaScript when both files are served with the correct MIME types. `execute` is asynchronous and returns `{ status, stdout, stderr, plan? }`.
 
-Contributions are welcome. Please open an issue or pull request on GitHub.
+Every invocation depends on browser-provided host capabilities; the package does not bundle filesystem or network implementations. The host must implement the methods reached by the selected command. A complete install host provides `read`, `atomicWrite`, `remove`, `exists`, `mkdir`, `fetch`, `fetchBytes`, `readBytes`, `readDir`, `stat`, `atomicWriteBytes`, `stdout`, and `stderr`. Binary capabilities exchange `Uint8Array` values, and `stat` returns `file`, `directory`, or `symlink`. See `src-rust/wasm.rs` for the complete interface.
 
-```bash
-git clone https://github.com/nightnetwork/dpm.git
-cd dpm
-npm install
-npm run build
-npm run test
-```
+## Supported Scope
+
+The browser Rust core implements:
+
+- `--help` and `-h`.
+- `install`, `i`, and `add` for one or more named package requests. These use the DPM registry by default with npm fallback.
+- `npm --help`, plus `npm install`, `npm i`, and `npm add` against the public npm registry.
+- `npm exec <command> [args...]`, which returns an execution plan for the browser host to run; DPM does not execute the process itself.
+
+Install supports `--registry <https-base-url>`, `--offline`, and `--frozen-lockfile`; direct DPM installs also support `--no-npm-fallback` and the `DPM_REGISTRY` execution-context variable. Root requests may use registry versions and tags, direct HTTPS `.tgz` URLs, `file:` directories or `.tgz` files, immutable `git+https` GitHub/GitLab commits, and `workspace:*` or `workspace:^` packages from array-form workspace declarations. The installer verifies and caches tarballs, safely extracts package files, installs registry dependencies in nested paths, resolves required and optional peers at the project root, writes lockfile metadata, and creates browser launchers for package bins.
+
+This is not a complete npm CLI. Lifecycle scripts are disabled, transitive dependencies are limited to registry version specifications, workspace selectors and globs are intentionally restricted, Git sources must use supported hosts and immutable commits, and commands not listed above return an unavailable-command result.
+
+## Building
+
+Install Rust through rustup, then run `npm pack`. Cargo and the WASM build script automatically use the dated nightly toolchain and `wasm32-unknown-unknown` target pinned in `rust-toolchain.toml`. `prepack` installs the pinned wasm-bindgen CLI 0.2.108 locally if needed, builds the Rust library with Cargo, and generates the web-target JS bindings, WASM, and declarations in `dist/`. Set `WASM_BINDGEN` to an existing CLI binary only if it reports version 0.2.108. No sibling project is required. Run `cargo test`, `npm test`, `npm run test:package`, and `npm run test:browser` to verify the source, packed consumer, and generated package in Chromium. The browser test searches standard Chromium and Chrome installation paths on Linux, macOS, and Windows; set `CHROMIUM_PATH` when the executable is elsewhere. It never downloads a browser.
 
 ## License
 
-Apache-2.0
+Apache-2.0. See `LICENSE`.

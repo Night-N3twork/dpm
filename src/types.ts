@@ -11,6 +11,7 @@ export interface PackageJson {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   optionalDependencies?: Record<string, string>;
   bundledDependencies?: string[];
   exports?: unknown;
@@ -28,11 +29,13 @@ export interface PackumentVersion {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   optionalDependencies?: Record<string, string>;
   dist: {
     tarball: string;
     shasum?: string;
     integrity?: string;
+    registry?: string;
   };
 }
 
@@ -46,6 +49,7 @@ export interface LockfileEntry {
   version: string;
   resolved?: string;
   integrity?: string;
+  registry?: string;
   dev?: boolean;
   requires?: Record<string, string>;
   dependencies?: Record<string, LockfileEntry>;
@@ -61,6 +65,7 @@ export interface LockfileV3 {
     version?: string;
     resolved?: string;
     integrity?: string;
+    registry?: string;
     dev?: boolean;
     bin?: string | Record<string, string>;
     dependencies?: Record<string, string>;
@@ -73,6 +78,7 @@ export interface ResolvedDep {
   version: string;
   tarballUrl: string;
   integrity?: string;
+  registry?: string;
   shasum?: string;
   dependencies: Record<string, string>;
   isDev: boolean;

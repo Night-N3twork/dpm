@@ -7,6 +7,7 @@ import { execCommand } from '../commands/exec.js';
 export const main = async (argv: string[]): Promise<number> => {
   const args = argv.slice(2);
   let packageName: string | undefined;
+  let registry: string | undefined;
   let command: string | undefined;
   let restArgs: string[] = [];
 
@@ -14,6 +15,10 @@ export const main = async (argv: string[]): Promise<number> => {
     const a = args[i]!;
     if (a === '-p' || a === '--package') {
       packageName = args[++i];
+      continue;
+    }
+    if (a === '--registry') {
+      registry = args[++i];
       continue;
     }
     if (a === '--') {
@@ -38,6 +43,7 @@ export const main = async (argv: string[]): Promise<number> => {
     tempInstall: true,
   };
   if (packageName) opts.packageName = packageName;
+  if (registry) opts.registry = registry;
   return await execCommand(opts);
 };
 
